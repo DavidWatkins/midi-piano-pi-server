@@ -456,11 +456,95 @@ class MIDIPlayer:
 
 # Global singleton instance
 _player: Optional[MIDIPlayer] = None
+_auto_queue_enabled: bool = True
+
+
+def set_auto_queue(enabled: bool) -> None:
+    """Enable or disable auto-queue advancement."""
+    global _auto_queue_enabled
+    _auto_queue_enabled = enabled
+
+
+def is_auto_queue_enabled() -> bool:
+    """Check if auto-queue is enabled."""
+    return _auto_queue_enabled
 
 
 def get_midi_player() -> MIDIPlayer:
     """Get the global MIDI player instance."""
     global _player
     if _player is None:
-        _player = MIDIPlayer()
+        _player = MIDIPlayer(on_status_change=_handle_playback_status_change)
     return _player
+
+
+def _handle_playback_status_change(status: PlaybackStatus) -> None:
+    """Handle playback status changes for auto-queue."""
+    global _auto_queue_enabled
+
+    # Check if song finished naturally (not manually stopped)
+    # Natural finish: state is STOPPED and position equals duration
+    if (status.state == PlaybackState.STOPPED and
+        status.duration_ms > 0 and
+        status.position_ms >= status.duration_ms - 100 and  # Allow small tolerance
+        _auto_queue_enabled):
+
+        # Schedule playing next song (avoid blocking the callback)
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_play_next_from_queue())
+        except RuntimeError:
+            pass  # No event loop available
+
+
+async def _play_next_from_queue() -> None:
+    """Play the next song from queue if available."""
+    import json
+    from pathlib import Path
+
+    QUEUE_FILE = Path("/var/lib/midi-piano-pi/queue.json")
+
+    # Small delay to ensure clean state
+    await asyncio.sleep(0.5)
+
+    # Load queue
+    if not QUEUE_FILE.exists():
+        return
+
+    try:
+        queue = json.loads(QUEUE_FILE.read_text())
+    except (json.JSONDecodeError, IOError):
+        return
+
+    if not queue:
+        return
+
+    # Pop next item
+    next_item = queue.pop(0)
+    QUEUE_FILE.write_text(json.dumps(queue))
+
+    # Find the file
+    from .config import get_settings
+    settings = get_settings()
+    catalog_dir = Path(settings.catalog.directory)
+
+    file_path = None
+    for path in catalog_dir.rglob("*"):
+        if path.is_file() and path.stem == next_item["id"]:
+            file_path = path
+            break
+
+    if not file_path:
+        logger.warning("Auto-queue: File not found: %s", next_item.get("name", next_item["id"]))
+        return
+
+    # Play the file
+    player = get_midi_player()
+    try:
+        await player.load_async(file_path)
+        await player.play()
+        logger.info("Auto-queue: Now playing %s", next_item.get("name", file_path.name))
+    except Exception as e:
+        logger.error("Auto-queue: Failed to play %s: %s", next_item.get("name"), e)
