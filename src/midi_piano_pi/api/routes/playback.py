@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from ...core.config import get_settings
 from ...core.midi_player import MIDIPlayer, PlaybackState, get_midi_player
+from .catalog import id_to_path
 
 router = APIRouter(prefix="/api/v1/playback", tags=["playback"])
 
@@ -256,7 +257,7 @@ async def play_next(player: MIDIPlayer = Depends(get_midi_player)):
     next_item = queue.pop(0)
     save_queue(queue)
 
-    # Find and play the file in catalog directories
+    # Find and play the file using id_to_path
     settings = get_settings()
 
     file_path = None
@@ -264,12 +265,13 @@ async def play_next(player: MIDIPlayer = Depends(get_midi_player)):
         catalog_dir = Path(dir_path).expanduser()
         if not catalog_dir.exists():
             continue
-        for path in catalog_dir.rglob("*"):
-            if path.is_file() and path.stem == next_item["id"]:
-                file_path = path
+        try:
+            potential_path = id_to_path(next_item["id"], catalog_dir)
+            if potential_path.exists() and potential_path.is_file():
+                file_path = potential_path
                 break
-        if file_path:
-            break
+        except (ValueError, KeyError):
+            continue
 
     if not file_path:
         return {"success": False, "message": f"File not found: {next_item['name']}", "queue": queue}

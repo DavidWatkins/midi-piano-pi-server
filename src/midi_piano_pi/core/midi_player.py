@@ -539,21 +539,27 @@ async def _play_next_from_queue() -> None:
     next_item = queue.pop(0)
     QUEUE_FILE.write_text(json.dumps(queue))
 
-    # Find the file in catalog directories
+    # Find the file in catalog directories using id_to_path
     from .config import get_settings
     settings = get_settings()
+
+    def id_to_path(file_id: str, base: Path) -> Path:
+        """Convert a URL-safe ID back to a path."""
+        rel_path = file_id.replace("__", "/")
+        return base / rel_path
 
     file_path = None
     for dir_path in settings.catalog.directories:
         catalog_dir = Path(dir_path).expanduser()
         if not catalog_dir.exists():
             continue
-        for path in catalog_dir.rglob("*"):
-            if path.is_file() and path.stem == next_item["id"]:
-                file_path = path
+        try:
+            potential_path = id_to_path(next_item["id"], catalog_dir)
+            if potential_path.exists() and potential_path.is_file():
+                file_path = potential_path
                 break
-        if file_path:
-            break
+        except (ValueError, KeyError):
+            continue
 
     if not file_path:
         logger.warning("Auto-queue: File not found: %s", next_item.get("name", next_item["id"]))
